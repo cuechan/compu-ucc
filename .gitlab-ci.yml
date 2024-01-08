@@ -32,4 +32,4 @@ build_package:
   script:
     - cargo build --release
     - cargo deb
-    - 'curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file target/deb/ucc_*_amd64.deb "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ucc/0.0.1/ucc.deb"'
+    - 'curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file target/debian/ucc_0.1.0_amd64.deb "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ucc/0.0.1/ucc.deb"'
