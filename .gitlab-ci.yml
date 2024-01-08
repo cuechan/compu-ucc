@@ -10,6 +10,7 @@ cache:
 stages:
   - build
   - test
+  - deploy
 
 
 build:
@@ -23,3 +24,12 @@ test:
   stage: test
   script:
   - cargo test
+
+build_package:
+  stage: deploy
+  before_script:
+    - cargo install cargo-deb
+  script:
+    - cargo build --release
+    - cargo deb
+    - 'curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file target/deb/ucc_*_amd64.deb "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ucc/0.0.1/ucc.deb"'

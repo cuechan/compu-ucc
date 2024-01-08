@@ -1,5 +1,6 @@
 [package]
 name = "ucc"
+description = "Compu microcode Compiler"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +8,14 @@ edition = "2021"
 
 [dependencies]
 nom = {version = "7.1.3", features = ["alloc"]}
+
+[package.metadata.deb]
+extended-description = "Compu microcode Compiler"
+maintainer = "Paul Maruhn <paulmaruhn@posteo.de>"
+copyright = "Paul Maruhn <paulmaruhn@posteo.de>"
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/ucc", "usr/bin/", "755"],
+]
