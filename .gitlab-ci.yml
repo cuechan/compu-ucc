@@ -31,5 +31,5 @@ build_package:
     - cargo install cargo-deb
   script:
     - cargo build --release
-    - DEB=$(cargo deb)
+    - DEB=$(cargo deb | tail -n 1)
     - 'curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ${DEB} "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ucc/0.0.1/ucc.deb"'
