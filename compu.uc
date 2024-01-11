@@ -1,6 +1,9 @@
 
-instruction JIZ = 34
+instruction NOP = 0
 
-if carry {
-    enable INC_MICROINST EN_REG1
-}
+enable INC_MICROINST
+enable RST_MICROINST HLT
+
+
+instruction STOB = 1
+enable

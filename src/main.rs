@@ -31,6 +31,7 @@ use nom::number::complete as number;
 use log::{error, warn, info, debug, trace};
 use log;
 use simple_logger;
+use itertools::Itertools;
 
 
 type Label = String;
@@ -367,6 +368,7 @@ enum Flag {
 
 struct Context {
     define_table: HashMap<String, Numeric>,
+    rev_define_table: HashMap<Numeric, String>,
     instructions: HashMap<String, Vec<String>>,
     uct: HashMap<u16, u32>,
     flags: (u32, u32),
@@ -377,12 +379,13 @@ struct Context {
 impl Context {
     fn new() -> Self {
         Self {
-            define_table: init_defines(),
+            define_table: init_defines().0,
             instructions: HashMap::new(),
-            uct: HashMap::new(),
+            uct: init_uct(),
             flags: (0, 0),
             instr: None,
-            ui_ctr: 0,
+            ui_ctr: 2,
+            rev_define_table: init_defines().1
         }
     }
 }
@@ -394,7 +397,8 @@ fn build_uc_table(tree: A) {
         process_block(&mut ctx, b);
     }
 
-    for (k, v) in ctx.uct {
+    for k in ctx.uct.keys().sorted() {
+        let v = ctx.uct.get(k).unwrap();
         // println!(
         //     "{:07b} {:06b} {:02b} => {:b}",
         //     (k >> 8),
@@ -403,27 +407,38 @@ fn build_uc_table(tree: A) {
         //     v
         // );
 
-        println!(
-            "// 0x{:04x}, {:02x}, {}, {}, {:032b};",
-            (k >> 8),
-            (k >> 2) & 0b111111,
-            if (k >> 1) & 0b1 == 1 {"Z"} else {"-"},
-            if (k) & 0b1 == 1 {"C"} else {"-"},
-            v
-        );
+        // info!(
+        //     "// 0x{:04x}, {:02x}, {}, {}, {:?};",
+        //     (k >> 8),
+        //     (k >> 2) & 0b111111,
+        //     if (k >> 1) & 0b1 == 1 {"Z"} else {"-"},
+        //     if (k) & 0b1 == 1 {"C"} else {"-"},
+        //     int_to_bitidx(*v)
+        //         .iter()
+        //         .map(|x| {
+        //             ctx.rev_define_table.get(&(*x as u64)).unwrap()
+        //         })
+        //         .join(" | ")
+        // );
 
         // wrMicrInst(LDA, 0, 1, 0, INC_MICROINST, EN_PC, WR_MAR);
         // wrMicrInst(opcode, microstepp, zeroflag, carryflag, allepinsdieanseinsollen, ...);
         println!(
-            "writeMicroCodeBin({}, {}, {}, {}, {});",
+            "writeMicroCodeBin({}, {}, {}, {}, {}) // {};",
             (k >> 8),
             (k >> 2) & 0b111111,
             (k >> 1) & 0b1,
             (k) & 0b1,
-            v
+            v,
+            int_to_bitidx(*v)
+                .iter()
+                .map(|x| {
+                    ctx.rev_define_table.get(&(*x as u64)).unwrap()
+                })
+                .join(" | ")
         );
 
-        println!();
+        // println!();
     }
 }
 
@@ -455,6 +470,7 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                 }
             },
             A::InstructionDeclaration { mnemoric, opcode } => {
+                ctx.ui_ctr = 2;
                 ctx.instr = Some((mnemoric, opcode));
             },
             A::Enable(a) => {
@@ -473,13 +489,13 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                                 if let Some(x) = ctx.uct.get(&addr.try_into().unwrap()) {
                                     ctx.uct.insert(
                                         addr.try_into().unwrap(),
-                                        *v as u32 | x
+                                        1 << *v as u32 | x
                                     );
                                 }
                                 else {
                                     ctx.uct.insert(
                                         addr.try_into().unwrap(),
-                                        *v as u32
+                                        1 << *v as u32
                                     );
                                 }
                             }
@@ -503,6 +519,8 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                         if let A::Block(bx) = *b {
                             process_block(ctx, bx);
                         }
+
+                        ctx.flags.0 -= 1;
                     },
                     "zero" => {
                         ctx.flags.1 += 1;
@@ -510,6 +528,7 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                         if let A::Block(bx) = *b {
                             process_block(ctx, bx);
                         }
+                        ctx.flags.1 -= 1;
 
                     },
                     _ => {
@@ -546,8 +565,9 @@ fn build_keys(opcode: u64, uc_ctr: u64, flag_c: bool, flag_z: bool) -> HashSet<u
 }
 
 
-fn init_defines() -> HashMap<String, u64>  {
+fn init_defines() -> (HashMap<String, u64>, HashMap<Numeric, String>)  {
     let mut defs: HashMap<String, u64> = HashMap::new();
+    let mut rdefs: HashMap<Numeric, String> = HashMap::new();
 
     defs.insert("HLT".to_string(), 0);
     defs.insert("RST_MICROINST".to_string(), 1);
@@ -582,5 +602,19 @@ fn init_defines() -> HashMap<String, u64>  {
     defs.insert("EN_SUM_ALU".to_string(), 30);
     defs.insert("EN_SUB_ALU".to_string(), 31);
 
-    defs
+    for (k, v) in defs.iter() {
+        rdefs.insert(*v, k.to_string());
+    }
+    (defs, rdefs)
+}
+
+
+fn init_uct() -> HashMap<u16, u32> {
+    let mut uct: HashMap<u16, u32> = HashMap::new();
+
+    // for i in 0..(2u32.pow(15)) {
+    //     uct.insert(i as u16, 0);
+    // }
+
+    uct
 }
