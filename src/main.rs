@@ -21,10 +21,16 @@ use nom::character::complete::{
 use nom::character;
 use nom::branch::{self, alt};
 use nom::bytes;
-use std::collections::HashMap;
+use std::arch::x86_64;
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::io::{stdin, Read};
+use std::vec;
 use nom::number::complete as number;
+use log::{error, warn, info, debug, trace};
+use log;
+use simple_logger;
 
 
 type Label = String;
@@ -342,6 +348,7 @@ fn read_lines_from_stdin() -> String {
 
 
 fn main() {
+    simple_logger::init_with_level(log::Level::Trace);
     let input = read_lines_from_stdin();
 
     let (r, t) = parse_block.parse(&input).unwrap();
@@ -352,21 +359,228 @@ fn main() {
 }
 
 
-fn build_uc_table(tree: A) {
-    let mut define_table: HashMap<String, Numeric> = HashMap::new();
+enum Flag {
+    Carry = 1,
+    Zero = 2
+}
 
-    if let A::Block(b) = tree {
-        for i in b {
-            println!("processing {:?}", i);
-            match i {
-                A::Define(k, v) => {
-                    define_table.insert(k, v);
-                },
-                A::InstructionDeclaration { mnemoric, opcode } => {
-                    println!("instruction lol");
-                },
-                _ => unimplemented!()
-            }
+
+struct Context {
+    define_table: HashMap<String, Numeric>,
+    instructions: HashMap<String, Vec<String>>,
+    uct: HashMap<u16, u32>,
+    flags: (u32, u32),
+    instr: Option<(String, u64)>,
+    ui_ctr: u64,
+}
+
+impl Context {
+    fn new() -> Self {
+        Self {
+            define_table: init_defines(),
+            instructions: HashMap::new(),
+            uct: HashMap::new(),
+            flags: (0, 0),
+            instr: None,
+            ui_ctr: 0,
         }
     }
+}
+
+fn build_uc_table(tree: A) {
+    let mut ctx = Context::new();
+
+    if let A::Block(mut b) = tree {
+        process_block(&mut ctx, b);
+    }
+
+    for (k, v) in ctx.uct {
+        // println!(
+        //     "{:07b} {:06b} {:02b} => {:b}",
+        //     (k >> 8),
+        //     (k >> 2) & 0b111111,
+        //     (k) & 0b11,
+        //     v
+        // );
+
+        println!(
+            "// 0x{:04x}, {:02x}, {}, {}, {:032b};",
+            (k >> 8),
+            (k >> 2) & 0b111111,
+            if (k >> 1) & 0b1 == 1 {"Z"} else {"-"},
+            if (k) & 0b1 == 1 {"C"} else {"-"},
+            v
+        );
+
+        // wrMicrInst(LDA, 0, 1, 0, INC_MICROINST, EN_PC, WR_MAR);
+        // wrMicrInst(opcode, microstepp, zeroflag, carryflag, allepinsdieanseinsollen, ...);
+        println!(
+            "writeMicroCodeBin({}, {}, {}, {}, {});",
+            (k >> 8),
+            (k >> 2) & 0b111111,
+            (k >> 1) & 0b1,
+            (k) & 0b1,
+            v
+        );
+
+        println!();
+    }
+}
+
+fn int_to_bitidx(n: u32) -> Vec<u8> {
+    let mut v = vec![];
+    for b in 0..31 {
+        if ((n >> b) & 1) == 1 {
+            v.push(b)
+        }
+    }
+    v
+}
+
+
+#[test]
+fn test_int_to_bitidx() {
+    assert_eq!(int_to_bitidx(5), vec![0, 2]);
+    assert_eq!(int_to_bitidx(34952), vec![3, 7, 11, 15]);
+}
+
+
+fn process_block(mut ctx: &mut Context, block: Vec<A>) {
+    for i in block {
+        debug!("processing {:?}", i);
+        match i {
+            A::Define(k, v) => {
+                if let Some(v) = ctx.define_table.insert(k.to_string(), v) {
+                    warn!("Definition '{}' is overwritten", k);
+                }
+            },
+            A::InstructionDeclaration { mnemoric, opcode } => {
+                ctx.instr = Some((mnemoric, opcode));
+            },
+            A::Enable(a) => {
+                if let Some((mnemoric, opcode)) = ctx.instr.clone() {
+
+                    for def in a {
+                        if let Some(v) = ctx.define_table.get(&def) {
+                            let keys = build_keys(
+                                opcode,
+                                ctx.ui_ctr,
+                                ctx.flags.0 > 0,
+                                ctx.flags.1 > 0
+                            );
+
+                            for addr in keys {
+                                if let Some(x) = ctx.uct.get(&addr.try_into().unwrap()) {
+                                    ctx.uct.insert(
+                                        addr.try_into().unwrap(),
+                                        *v as u32 | x
+                                    );
+                                }
+                                else {
+                                    ctx.uct.insert(
+                                        addr.try_into().unwrap(),
+                                        *v as u32
+                                    );
+                                }
+                            }
+
+                        } else {
+                            error!("Identifier '{}' is not known or defined", def);
+                            panic!();
+                        }
+                    }
+                    ctx.ui_ctr += 1;
+                } else {
+                    error!("'enable' not allowd without previous 'instruction' preamble");
+                    panic!();
+                }
+            },
+            A::If(flag, b) => {
+                match flag.as_str() {
+                    "carry" => {
+                        ctx.flags.0 += 1;
+
+                        if let A::Block(bx) = *b {
+                            process_block(ctx, bx);
+                        }
+                    },
+                    "zero" => {
+                        ctx.flags.1 += 1;
+
+                        if let A::Block(bx) = *b {
+                            process_block(ctx, bx);
+                        }
+
+                    },
+                    _ => {
+                        error!("unknown flag '{}'", flag);
+                        panic!();
+                    }
+
+                }
+            }
+            _ => unimplemented!()
+        }
+    }
+}
+
+fn build_keys(opcode: u64, uc_ctr: u64, flag_c: bool, flag_z: bool) -> HashSet<u64> {
+    let mut entries = HashSet::new();
+
+    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b00 );
+    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b01 );
+    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b10 );
+    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b11 );
+
+
+    if flag_c {
+        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
+        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b10 ));
+    }
+    if flag_z {
+        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
+        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b01 ));
+    }
+
+    entries
+}
+
+
+fn init_defines() -> HashMap<String, u64>  {
+    let mut defs: HashMap<String, u64> = HashMap::new();
+
+    defs.insert("HLT".to_string(), 0);
+    defs.insert("RST_MICROINST".to_string(), 1);
+    defs.insert("INC_MICROINST".to_string(), 2);
+    defs.insert("EN_REG1".to_string(), 3);
+    defs.insert("WR_REG1".to_string(), 4);
+    defs.insert("SHIFT_REG1".to_string(), 5);
+    defs.insert("EN_REG2".to_string(), 6);
+    defs.insert("WR_REG2".to_string(), 7);
+    defs.insert("SHIFT_REG2".to_string(), 8);
+    defs.insert("WR_MAR".to_string(), 9);
+    defs.insert("CE_RAM".to_string(), 10);
+    defs.insert("WR_RAM".to_string(), 11);
+    defs.insert("OE_RAM".to_string(), 12);
+    defs.insert("SET_FLAGS_ALU".to_string(), 13);
+    defs.insert("EN_A_ALU".to_string(), 14);
+    defs.insert("WR_A_ALU".to_string(), 15);
+    defs.insert("EN_AND_ALU".to_string(), 16);
+    defs.insert("EN_OR_ALU".to_string(), 17);
+    defs.insert("EN_XOR_ALU".to_string(), 18);
+    defs.insert("EN_IR".to_string(), 19);
+    defs.insert("WR_IR".to_string(), 20);
+    defs.insert("INC_PC".to_string(), 21);
+    defs.insert("EN_PC".to_string(), 22);
+    defs.insert("LOAD_PC".to_string(), 23);
+    defs.insert("CARRY_IN_ALU".to_string(), 24);
+    defs.insert("EN_SHIFT_L_ALU".to_string(), 25);
+    defs.insert("EN_SHIFT_R_ALU".to_string(), 26);
+    defs.insert("EN_B_ALU".to_string(), 27);
+    defs.insert("WR_B_ALU".to_string(), 28);
+    defs.insert("EN_NOT_ALU".to_string(), 29);
+    defs.insert("EN_SUM_ALU".to_string(), 30);
+    defs.insert("EN_SUB_ALU".to_string(), 31);
+
+    defs
 }
