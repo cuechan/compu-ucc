@@ -1,9 +1,9 @@
 #![allow(unused)]
 use nom;
 use nom::bytes::complete::{tag, tag_no_case};
-use nom::combinator::{map_res, opt};
+use nom::combinator::{map_res, opt, success};
 use nom::multi::{fold_many1, separated_list1, many0};
-use nom::sequence::{tuple, separated_pair, preceded, delimited};
+use nom::sequence::{tuple, separated_pair, preceded, delimited, terminated};
 use nom::IResult;
 use nom::Parser;
 use nom::character::complete::{
@@ -21,11 +21,17 @@ use nom::character::complete::{
 use nom::character;
 use nom::branch::{self, alt};
 use nom::bytes;
+use petgraph::{Graph, Directed};
+use petgraph::data::Build;
+use petgraph::dot::{Config, Dot};
+use petgraph::graph::DiGraph;
 use std::arch::x86_64;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::io::{stdin, Read};
+use std::ops::Deref;
+use std::process::exit;
 use std::vec;
 use nom::number::complete as number;
 use log::{error, warn, info, debug, trace};
@@ -36,6 +42,10 @@ use itertools::Itertools;
 
 type Label = String;
 type Numeric = u64;
+type CfGraph = Graph<A, usize, Directed, usize>;
+
+const FLAG_Z: u64 = 0b01;
+const FLAG_C: u64 = 0b10;
 
 
 fn parse_dec_number(input: &str) -> IResult<&str, Numeric> {
@@ -270,14 +280,31 @@ fn test_parse_define() {
 }
 
 
+fn parse_condition(input: &str) -> IResult<&str, (bool, String)> {
+    let (r, (c, f)) = tuple((
+        opt(alt((
+            terminated(
+                tag_no_case("!"),
+                space0
+            ),
+            terminated(
+                tag_no_case("not"),
+                space1
+            )
+        ))),
+        alpha1
+    )).parse(input)?;
 
+
+    Ok((r, (c.is_some(), f.to_string())))
+}
 
 
 fn parse_if(input: &str) -> IResult<&str, A> {
-    let (r, (_, _, i, _, f)) = tuple((
+    let (r, (_, _, (i, c), _, f)) = tuple((
         tag_no_case("if"),
         space1,
-        alphanumeric1,
+        parse_condition,
         space1,
         delimited(
             tag("{"),
@@ -286,7 +313,7 @@ fn parse_if(input: &str) -> IResult<&str, A> {
         )
     )).parse(input)?;
 
-    Ok((r, A::If(i.to_string(), Box::new(f))))
+    Ok((r, A::If(!i, c, Box::new(f))))
 }
 
 
@@ -324,7 +351,7 @@ fn parse_block(input: &str) -> IResult<&str, A> {
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum A {
     Block(Vec<A>),
     Enable(Vec<String>),
@@ -333,8 +360,9 @@ enum A {
         mnemoric: String,
         opcode: Numeric,
     },
-    If(String, Box<A>),
+    If(bool, String, Box<A>),
     Literal(u64),
+    Not,
 }
 
 
@@ -349,29 +377,110 @@ fn read_lines_from_stdin() -> String {
 
 
 fn main() {
-    simple_logger::init_with_level(log::Level::Trace);
+    simplelog::TermLogger::init(
+        log::LevelFilter::Debug,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Stderr,
+        simplelog::ColorChoice::Auto
+    );
+
     let input = read_lines_from_stdin();
 
     let (r, t) = parse_block.parse(&input).unwrap();
+    if r.len() > 0 {
+        error!("remaining: '{}'", r);
+        exit(1);
+    }
 
-    println!("remaining: {:#?}", r);
-    // println!("{:#?}", f);
-    build_uc_table(t)
+    info!("AST:");
+    info!("{:#?}", t);
+
+    // let expanded_ast = expand_ast(t);
+
+    let g = ast_to_cfg(t);
+
+    println!("{:#?}", Dot::with_config(&g, &[]));
+
+    // build_uc_table(expanded_ast)
 }
 
 
-enum Flag {
-    Carry = 1,
-    Zero = 2
+
+fn ast_to_cfg(t: A) ->  CfGraph {
+    let mut g: CfGraph = Graph::new();
+
+    let f = iterate_to_cfg(&t, g);
+    g
+}
+
+fn iterate_to_cfg(t: &A, mut g: CfGraph) {
+    let mut nb = vec![];
+
+    if let A::Block(block) = t {
+
+        for i in block {
+            g.add_node(i.clone());
+
+            debug!("processing {:?}", i);
+
+            match i {
+                A::Define(k, v) => nb.push(A::Define(k.clone(), *v)),
+                A::InstructionDeclaration { mnemoric, opcode } => nb.push(A::InstructionDeclaration { mnemoric: mnemoric.clone(), opcode: *opcode }),
+                A::Enable(a) => nb.push(A::Enable(a.clone())),
+                A::If(i, flag, b) => {
+                    Box::new(iterate_to_cfg(b, g));
+                },
+                _ => unimplemented!()
+            };
+        }
+    };
 }
 
 
+
+
+fn expand_ast(t: A) -> A {
+    let f = iterate_expand(&t);
+    f
+}
+
+fn iterate_expand(t: &A) -> A {
+    let mut nb = vec![];
+
+    if let A::Block(block) = t {
+        for i in block {
+            debug!("processing {:?}", i);
+
+            match i {
+                A::Define(k, v) => nb.push(A::Define(k.clone(), *v)),
+                A::InstructionDeclaration { mnemoric, opcode } => nb.push(A::InstructionDeclaration { mnemoric: mnemoric.clone(), opcode: *opcode }),
+                A::Enable(a) => nb.push(A::Enable(a.clone())),
+                A::If(i, flag, b) => {
+                    nb.push(A::If(*i, flag.clone(), Box::new(iterate_expand(b))));
+                    nb.push(A::If(!*i, flag.clone(), Box::new(iterate_expand(b))));
+                },
+                _ => unimplemented!()
+            };
+        }
+    };
+
+    A::Block(nb)
+}
+
+#[derive(Debug, Clone)]
+struct Flags {
+    carry: Option<bool>,
+    zero: Option<bool>
+}
+
+
+#[derive(Debug, Clone)]
 struct Context {
     define_table: HashMap<String, Numeric>,
     rev_define_table: HashMap<Numeric, String>,
     instructions: HashMap<String, Vec<String>>,
     uct: HashMap<u16, u32>,
-    flags: (u32, u32),
+    flags: Vec<Flags>,
     instr: Option<(String, u64)>,
     ui_ctr: u64,
 }
@@ -382,9 +491,9 @@ impl Context {
             define_table: init_defines().0,
             instructions: HashMap::new(),
             uct: init_uct(),
-            flags: (0, 0),
+            flags: vec![Flags {carry: None, zero: None}],
             instr: None,
-            ui_ctr: 2,
+            ui_ctr: 0,
             rev_define_table: init_defines().1
         }
     }
@@ -394,7 +503,7 @@ fn build_uc_table(tree: A) {
     let mut ctx = Context::new();
 
     if let A::Block(mut b) = tree {
-        process_block(&mut ctx, b);
+        process_block(&mut ctx, &b);
     }
 
     for k in ctx.uct.keys().sorted() {
@@ -407,29 +516,13 @@ fn build_uc_table(tree: A) {
         //     v
         // );
 
-        // info!(
-        //     "// 0x{:04x}, {:02x}, {}, {}, {:?};",
-        //     (k >> 8),
-        //     (k >> 2) & 0b111111,
-        //     if (k >> 1) & 0b1 == 1 {"Z"} else {"-"},
-        //     if (k) & 0b1 == 1 {"C"} else {"-"},
-        //     int_to_bitidx(*v)
-        //         .iter()
-        //         .map(|x| {
-        //             ctx.rev_define_table.get(&(*x as u64)).unwrap()
-        //         })
-        //         .join(" | ")
-        // );
-
-        // wrMicrInst(LDA, 0, 1, 0, INC_MICROINST, EN_PC, WR_MAR);
-        // wrMicrInst(opcode, microstepp, zeroflag, carryflag, allepinsdieanseinsollen, ...);
-        println!(
-            "writeMicroCodeBin({}, {}, {}, {}, {}) // {};",
+        info!(
+            "{:04x} = 0x{:04x}, {:02x}, {}, {}, {:?};",
+            k,
             (k >> 8),
             (k >> 2) & 0b111111,
-            (k >> 1) & 0b1,
-            (k) & 0b1,
-            v,
+            if (k >> 1) & 0b1 == 1 {"Z"} else {"-"},
+            if (k) & 0b1 == 1 {"C"} else {"-"},
             int_to_bitidx(*v)
                 .iter()
                 .map(|x| {
@@ -438,7 +531,22 @@ fn build_uc_table(tree: A) {
                 .join(" | ")
         );
 
-        // println!();
+        // wrMicrInst(LDA, 0, 1, 0, INC_MICROINST, EN_PC, WR_MAR);
+        // wrMicrInst(opcode, microstepp, zeroflag, carryflag, allepinsdieanseinsollen, ...);
+        // println!(
+        //     "writeMicroCodeBin({}, {}, {}, {}, {}); // {}",
+        //     (k >> 8),
+        //     (k >> 2) & 0b111111,
+        //     (k >> 1) & 0b1,
+        //     (k) & 0b1,
+        //     v,
+        //     int_to_bitidx(*v)
+        //         .iter()
+        //         .map(|x| {
+        //             ctx.rev_define_table.get(&(*x as u64)).unwrap()
+        //         })
+        //         .join(" | ")
+        // );
     }
 }
 
@@ -460,29 +568,29 @@ fn test_int_to_bitidx() {
 }
 
 
-fn process_block(mut ctx: &mut Context, block: Vec<A>) {
+fn process_block(mut ctx: &mut Context, block: &Vec<A>) {
     for i in block {
         debug!("processing {:?}", i);
+
         match i {
             A::Define(k, v) => {
-                if let Some(v) = ctx.define_table.insert(k.to_string(), v) {
+                if let Some(v) = ctx.define_table.insert(k.to_string(), *v) {
                     warn!("Definition '{}' is overwritten", k);
                 }
             },
             A::InstructionDeclaration { mnemoric, opcode } => {
-                ctx.ui_ctr = 2;
-                ctx.instr = Some((mnemoric, opcode));
+                ctx.ui_ctr = 1;
+                ctx.instr = Some((mnemoric.to_owned(), *opcode));
             },
             A::Enable(a) => {
                 if let Some((mnemoric, opcode)) = ctx.instr.clone() {
-
                     for def in a {
-                        if let Some(v) = ctx.define_table.get(&def) {
+                        if let Some(v) = ctx.define_table.get(def) {
+
                             let keys = build_keys(
                                 opcode,
                                 ctx.ui_ctr,
-                                ctx.flags.0 > 0,
-                                ctx.flags.1 > 0
+                                ctx.flags.last().unwrap()
                             );
 
                             for addr in keys {
@@ -499,7 +607,6 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                                     );
                                 }
                             }
-
                         } else {
                             error!("Identifier '{}' is not known or defined", def);
                             panic!();
@@ -511,54 +618,79 @@ fn process_block(mut ctx: &mut Context, block: Vec<A>) {
                     panic!();
                 }
             },
-            A::If(flag, b) => {
+            A::If(i, flag, b) => {
+                let mut oldflags = ctx.flags.last().unwrap();
+                let mut newflags: Flags = oldflags.clone();
+
                 match flag.as_str() {
                     "carry" => {
-                        ctx.flags.0 += 1;
-
-                        if let A::Block(bx) = *b {
+                        newflags.carry = Some(oldflags.carry.unwrap_or(*i) & i);
+                        ctx.flags.push(newflags.clone());
+                        if let A::Block(ref bx) = **b {
                             process_block(ctx, bx);
                         }
+                        ctx.flags.pop();
 
-                        ctx.flags.0 -= 1;
+
+                        newflags.carry = Some(!newflags.carry.unwrap());
+                        ctx.flags.push(newflags);
+                        if let A::Block(ref bx) = **b {
+                            process_block(ctx, bx);
+                        }
+                        ctx.flags.pop();
                     },
                     "zero" => {
-                        ctx.flags.1 += 1;
+                        newflags.zero = Some(oldflags.zero.unwrap_or(*i) & i);
+                        ctx.flags.push(newflags);
 
-                        if let A::Block(bx) = *b {
+                        if let A::Block(ref bx) = **b {
                             process_block(ctx, bx);
                         }
-                        ctx.flags.1 -= 1;
-
+                        ctx.flags.pop().expect("no more context on stack");
                     },
                     _ => {
                         error!("unknown flag '{}'", flag);
                         panic!();
                     }
-
                 }
+
+
+
             }
             _ => unimplemented!()
         }
     }
 }
 
-fn build_keys(opcode: u64, uc_ctr: u64, flag_c: bool, flag_z: bool) -> HashSet<u64> {
+fn build_keys(opcode: u64, uc_ctr: u64, flags: &Flags) -> HashSet<u64> {
     let mut entries = HashSet::new();
 
-    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b00 );
-    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b01 );
-    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b10 );
-    entries.insert( (opcode << 8) | (uc_ctr << 2) | 0b11 );
-
-
-    if flag_c {
-        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
-        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b10 ));
+    for i in 0..4 {
+        entries.insert(((opcode << 8) | (uc_ctr << 2) | i ));
     }
-    if flag_z {
-        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
-        entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b01 ));
+
+    if let Some(flag_c) = flags.carry {
+        if flag_c {
+            // carry flag must be true
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b10 ));
+        } else {
+            // carry flag must be false
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b01 ));
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b11 ));
+        }
+    }
+
+    if let Some(flag_z) = flags.zero {
+        if flag_z {
+            // flag must be true
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b00 ));
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b01 ));
+        } else {
+            // flag must be false
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b10 ));
+            entries.remove( &((opcode << 8) | (uc_ctr << 2) | 0b11 ));
+        }
     }
 
     entries
@@ -605,6 +737,7 @@ fn init_defines() -> (HashMap<String, u64>, HashMap<Numeric, String>)  {
     for (k, v) in defs.iter() {
         rdefs.insert(*v, k.to_string());
     }
+
     (defs, rdefs)
 }
 
